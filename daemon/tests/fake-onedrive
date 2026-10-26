@@ -5,6 +5,13 @@ echo "args: $*" >> "$FAKE_LOG"
 trap 'echo "end: TERM" >> "$FAKE_LOG"; echo "Sync with Microsoft OneDrive was interrupted (SIGTERM)"; exit 0' TERM
 
 case " $* " in
+*" --display-quota "*)
+    echo "Microsoft OneDrive quota information as reported for this Drive ID: fake"
+    echo "Used:      0.15 GB (161061273 bytes)"
+    echo "Total:     5 GB (5368709120 bytes)"
+    echo "end: quota" >> "$FAKE_LOG"
+    exit 0
+    ;;
 *" --reauth "*)
     # --confdir DIR --reauth --auth-files URLFILE:RESPONSEFILE
     confdir=$2 url_file=${5%%:*} resp_file=${5#*:}
@@ -23,7 +30,15 @@ if [ ! -s "$3/refresh_token" ]; then
     echo "end: notoken" >> "$FAKE_LOG"
     exit 1
 fi
+# touch $FAKE_CRASH to make the next run crash
+if [ -n "${FAKE_CRASH:-}" ] && [ -e "$FAKE_CRASH" ]; then
+    rm -f "$FAKE_CRASH"
+    echo "end: crash" >> "$FAKE_LOG"
+    exit 134
+fi
 echo "Starting a sync with Microsoft OneDrive"
+echo "Number of items to download from Microsoft OneDrive: 1"
+echo "Downloading: Docs/a.txt ... 50%  |  ETA    00:00:01"
 echo "Downloading file: Docs/a.txt ... done"
 echo "Uploading new file: ./db-pc-safeBackup-0001.kdbx ... done"
 echo "Sync with Microsoft OneDrive is complete"

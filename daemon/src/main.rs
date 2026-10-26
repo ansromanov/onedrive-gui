@@ -2,7 +2,8 @@
 //!
 //! Safety rules: never touch synced files or the onedrive database; only pass `--monitor --confdir`,
 //! plus `--resync --resync-auth` once after the user applies settings (onedrive refuses to start
-//! otherwise), and `--reauth --auth-files` to sign in; stop onedrive with SIGTERM only so it can
+//! otherwise), `--reauth --auth-files` to sign in, and `--display-quota` (read-only) before each
+//! start; stop onedrive with SIGTERM only so it can
 //! shut down cleanly; edit the config only while onedrive is stopped, atomically, with a backup.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -21,6 +22,8 @@ use zbus::object_server::SignalEmitter;
 const NAME: &str = "org.onedrivegui.Daemon";
 const PATH: &str = "/org/onedrivegui/Daemon";
 const RECENT_MAX: usize = 100;
+/// Seconds to wait before restarting onedrive after it crashed, by attempt.
+const RETRY_DELAYS: [u64; 5] = [10, 30, 60, 120, 300];
 
 #[derive(Debug, PartialEq)]
 enum Event {
@@ -28,6 +31,10 @@ enum Event {
     Synced,
     SyncedWithFailures,
     Transfer { action: &'static str, path: String, ok: bool },
+    /// Files onedrive announced it is about to transfer.
+    Planned(u64),
+    /// Big-file transfer progress.
+    Progress { path: String, percent: u32 },
     SignedOut(String),
     AuthWaiting,
     Error(String),
@@ -65,6 +72,22 @@ fn parse(line: &str) -> Option<Event> {
         let action = if action == "upload" && path.contains("-safeBackup-") { "conflict" } else { action };
         return Some(Event::Transfer { action, path: path.to_string(), ok });
     }
+    for prefix in ["Downloading: ", "Uploading: "] {
+        // "Downloading: <path> ... 45%  |  ETA    00:00:12" (also "| DONE in ...")
+        let Some(i) = line.find(prefix) else { continue };
+        let (path, tail) = line[i + prefix.len()..].rsplit_once(" ... ")?;
+        let percent = tail.split('%').next()?.trim().parse().ok()?;
+        return Some(Event::Progress { path: path.to_string(), percent });
+    }
+    for prefix in [
+        "Number of items to download from Microsoft OneDrive: ",
+        "New items to upload to Microsoft OneDrive: ",
+        "Changed local items to upload to Microsoft OneDrive: ",
+    ] {
+        if let Some(n) = line.find(prefix).and_then(|i| line[i + prefix.len()..].trim().parse().ok()) {
+            return Some(Event::Planned(n));
+        }
+    }
     if line.contains("Starting a sync with Microsoft OneDrive") || line.contains("Syncing changes from Microsoft OneDrive") {
         Some(Event::Syncing)
     } else if line.contains("Sync with Microsoft OneDrive is complete") {
@@ -78,6 +101,21 @@ fn parse(line: &str) -> Option<Event> {
     } else {
         line.find("ERROR: ").map(|i| Event::Error(line[i + 7..].to_string()))
     }
+}
+
+/// `("Total" | "Used", bytes)` from `onedrive --display-quota` output, e.g. "Used:      0.15 GB (161061273 bytes)".
+fn parse_quota(line: &str) -> Option<(&str, u64)> {
+    let (key, rest) = line.split_once(':')?;
+    let bytes = rest.split_once('(')?.1.strip_suffix(" bytes)")?.trim().parse().ok()?;
+    matches!(key, "Total" | "Used").then_some((key, bytes))
+}
+
+/// Account names become directory names under ~/.config/onedrive/accounts.
+fn valid_account_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 100
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || "@._+-".contains(c))
 }
 
 fn home() -> PathBuf {
@@ -104,6 +142,11 @@ fn managed_exclude(line: &str) -> Option<String> {
     let v = config_value(line, "skip_dir")?;
     let name = v.strip_prefix('/')?;
     valid_folder_name(name).then(|| name.to_string())
+}
+
+/// Top-level folders the GUI excluded in an account's config.
+fn excluded_folders(confdir: &Path) -> BTreeSet<String> {
+    std::fs::read_to_string(confdir.join("config")).unwrap_or_default().lines().filter_map(managed_exclude).collect()
 }
 
 /// Read `sync_dir` from an account's config the way onedrive does (default `~/OneDrive`).
@@ -180,6 +223,10 @@ fn signed_in(confdir: &Path) -> bool {
     std::fs::metadata(confdir.join("refresh_token")).is_ok_and(|m| m.len() > 0)
 }
 
+fn onedrive() -> Command {
+    Command::new(std::env::var_os("ONEDRIVE_BIN").unwrap_or_else(|| "onedrive".into()))
+}
+
 fn terminate(pid: u32) {
     // SIGTERM only: onedrive finishes its current step and closes its database cleanly.
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
@@ -207,6 +254,16 @@ struct Account {
     auth_dir: Option<PathBuf>,
     auth_url: String,
     resync_next: bool,
+    /// crashes since the last completed sync, for the restart backoff
+    restarts: usize,
+    retry_at: u64,
+    planned: u64,
+    transferred: u64,
+    current: String,
+    percent: u32,
+    quota_used: u64,
+    quota_total: u64,
+    excluded: BTreeSet<String>,
 }
 
 #[derive(Default)]
@@ -218,10 +275,25 @@ struct State {
 impl State {
     fn apply(&mut self, name: &str, event: Event) {
         let a = self.accounts.get_mut(name).expect("known account");
-        if let Event::Transfer { action, path, ok } = event {
-            self.recent.push_front(json!({"account": name, "action": action, "path": path, "ok": ok, "time": now()}));
-            self.recent.truncate(RECENT_MAX);
-            return;
+        match event {
+            Event::Transfer { action, path, ok } => {
+                if ok && ["upload", "download", "conflict"].contains(&action) {
+                    a.transferred += 1;
+                }
+                a.current.clear();
+                self.recent.push_front(json!({"account": name, "action": action, "path": path, "ok": ok, "time": now()}));
+                self.recent.truncate(RECENT_MAX);
+                return;
+            }
+            Event::Planned(n) => {
+                a.planned += n;
+                return;
+            }
+            Event::Progress { path, percent } => {
+                (a.current, a.percent) = if percent < 100 { (path, percent) } else { (String::new(), 0) };
+                return;
+            }
+            _ => {}
         }
         // lines printed while onedrive shuts down must not overwrite "paused"
         if a.paused {
@@ -232,10 +304,13 @@ impl State {
             Event::Synced => {
                 a.status = "synced";
                 a.error.clear();
+                a.restarts = 0;
+                a.reset_progress();
             }
             Event::SyncedWithFailures => {
                 a.status = "error";
                 a.error = "Some items couldn't be synced".into();
+                a.reset_progress();
             }
             Event::SignedOut(msg) => {
                 a.needs_auth = true;
@@ -245,8 +320,14 @@ impl State {
                 a.status = "error";
                 a.error = msg;
             }
-            Event::Transfer { .. } | Event::AuthWaiting => {}
+            Event::Transfer { .. } | Event::Planned(_) | Event::Progress { .. } | Event::AuthWaiting => {}
         }
+    }
+}
+
+impl Account {
+    fn reset_progress(&mut self) {
+        (self.planned, self.transferred, self.current, self.percent) = (0, 0, String::new(), 0);
     }
 }
 
@@ -288,7 +369,11 @@ impl Daemon {
             let resync = mode == Mode::Monitor && std::mem::take(&mut a.resync_next);
             (a.dir.clone(), resync, a.auth_dir.clone())
         };
-        let mut cmd = Command::new(std::env::var_os("ONEDRIVE_BIN").unwrap_or_else(|| "onedrive".into()));
+        // a resync run must come first: onedrive refuses anything else until then
+        if mode == Mode::Monitor && !resync && !self.query_quota(&name, &dir).await {
+            return; // paused meanwhile
+        }
+        let mut cmd = onedrive();
         match (mode, &auth_dir) {
             (Mode::SignIn, Some(auth)) => {
                 let files = format!("{}:{}", auth.join("auth-url").display(), auth.join("response-url").display());
@@ -312,6 +397,9 @@ impl Daemon {
                     a.status = "stopped";
                     a.error = format!("Cannot start onedrive: {e}");
                 });
+                if mode == Mode::Monitor {
+                    self.schedule_retry(&name);
+                }
                 return;
             }
         };
@@ -351,10 +439,11 @@ impl Daemon {
         }
         let exit = child.wait().await;
 
-        let restart = self.update(|s| {
+        let (restart, retry) = self.update(|s| {
             let a = s.accounts.get_mut(&name).expect("known account");
             a.pid = None;
             a.running = false;
+            a.reset_progress();
             if mode == Mode::SignIn {
                 a.auth_url.clear();
                 a.paused = false;
@@ -371,29 +460,112 @@ impl Daemon {
                 } else {
                     a.error.clear();
                 }
-                return !a.needs_auth;
+                return (!a.needs_auth, false);
             }
             let restart = !a.paused && a.stopping; // resumed while still stopping
+            let mut retry = false;
             if a.paused {
                 a.status = "paused";
             } else if a.needs_auth {
                 a.status = "signedout";
             } else if !restart {
-                // shortcut: no auto-restart on unexpected exit, user presses Retry; add backoff restart if crashes prove common
                 a.status = "stopped";
                 if a.error.is_empty() {
-                    a.error = match exit {
+                    a.error = match &exit {
                         Ok(st) => format!("onedrive stopped unexpectedly ({st})"),
                         Err(e) => format!("onedrive stopped unexpectedly ({e})"),
                     };
                 }
+                // crashed: try again later; a clean exit on its own is left for the user to Retry
+                retry = !exit.as_ref().is_ok_and(|st| st.success());
+                // an interrupted resync has to be redone, plain starts would be refused
+                a.resync_next |= resync;
             }
             a.stopping = false;
-            restart
+            (restart, retry)
         });
         if restart {
             self.start(&name);
+        } else if retry {
+            self.schedule_retry(&name);
         }
+    }
+
+    /// Restart onedrive after a growing delay, unless the user pauses, resumes or retries first.
+    fn schedule_retry(&self, name: &str) {
+        let (generation, delay) = self.update(|s| {
+            let a = s.accounts.get_mut(name).expect("known account");
+            let delay = RETRY_DELAYS[a.restarts.min(RETRY_DELAYS.len() - 1)];
+            a.restarts += 1;
+            a.retry_at = now() + delay;
+            (a.pause_gen, delay)
+        });
+        let (d, name) = (self.clone(), name.to_string());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(delay)).await;
+            let due = {
+                let mut s = d.state.lock().unwrap();
+                let a = s.accounts.get_mut(&name).expect("known account");
+                let due = a.pause_gen == generation && !a.running && !a.paused && !a.needs_auth;
+                if due {
+                    a.retry_at = 0;
+                }
+                due
+            };
+            if due {
+                d.start(&name);
+            }
+        });
+    }
+
+    /// Read used/total storage with `onedrive --display-quota` (it can't run beside --monitor, which
+    /// locks the database). Its pid is tracked so Pause stops it. Returns false if paused meanwhile.
+    async fn query_quota(&self, name: &str, dir: &Path) -> bool {
+        // shortcut: quota refreshes only when onedrive (re)starts; poll if it goes stale over long sessions
+        let spawned = onedrive()
+            .arg("--confdir")
+            .arg(dir)
+            .arg("--display-quota")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        if let Ok(mut child) = spawned {
+            self.state.lock().unwrap().accounts.get_mut(name).expect("known account").pid = child.id();
+            let mut lines = BufReader::new(child.stdout.take().expect("piped")).lines();
+            let (mut used, mut total) = (0, 0);
+            let read = async {
+                while let Ok(Some(l)) = lines.next_line().await {
+                    match parse_quota(l.trim()) {
+                        Some(("Used", b)) => used = b,
+                        Some(("Total", b)) => total = b,
+                        _ => {}
+                    }
+                }
+            };
+            if tokio::time::timeout(Duration::from_secs(60), read).await.is_err()
+                && let Some(pid) = child.id()
+            {
+                terminate(pid);
+            }
+            let _ = child.wait().await;
+            if total > 0 {
+                self.update(|s| {
+                    let a = s.accounts.get_mut(name).expect("known account");
+                    (a.quota_used, a.quota_total) = (used, total);
+                });
+            }
+        }
+        let mut s = self.state.lock().unwrap();
+        let a = s.accounts.get_mut(name).expect("known account");
+        a.pid = None;
+        a.stopping = false;
+        if a.paused {
+            a.running = false;
+            a.status = "paused";
+            return false;
+        }
+        true
     }
 
     fn resume_account(&self, name: &str) {
@@ -402,6 +574,7 @@ impl Daemon {
             a.paused = false;
             a.paused_until = 0;
             a.pause_gen += 1;
+            a.retry_at = 0;
             if a.needs_auth {
                 a.status = "signedout";
             }
@@ -440,9 +613,11 @@ impl Daemon {
 
 #[zbus::interface(name = "org.onedrivegui.Daemon1")]
 impl Daemon {
-    /// JSON: {"accounts": [{name, syncDir, status, error, pausedUntil, authUrl}], "recent": [{account, action, path, ok, time}]}
-    /// status: starting | syncing | synced | paused | error (onedrive running) | stopped (onedrive not running)
-    ///         | signedout | signingin (authUrl set once the browser page can be opened)
+    /// JSON: {"accounts": [{name, syncDir, status, error, pausedUntil, authUrl, retryAt, planned, transferred,
+    ///         current, percent, quotaUsed, quotaTotal, excluded}], "recent": [{account, action, path, ok, time}]}
+    /// status: starting | syncing | synced | paused | error (onedrive running) | stopped (onedrive not running,
+    ///         retryAt > 0 if a restart is scheduled) | signedout | signingin (authUrl set once the browser page can be opened)
+    /// planned/transferred count files in the current sync; current/percent is a big file in progress; quota 0 = unknown
     fn state(&self) -> String {
         let s = self.state.lock().unwrap();
         let accounts: Vec<Value> = s
@@ -450,7 +625,9 @@ impl Daemon {
             .iter()
             .map(|(name, a)| {
                 json!({"name": name, "syncDir": a.sync_dir, "status": a.status, "error": a.error,
-                       "pausedUntil": a.paused_until, "authUrl": a.auth_url})
+                       "pausedUntil": a.paused_until, "authUrl": a.auth_url, "retryAt": a.retry_at,
+                       "planned": a.planned, "transferred": a.transferred, "current": a.current, "percent": a.percent,
+                       "quotaUsed": a.quota_used, "quotaTotal": a.quota_total, "excluded": a.excluded})
             })
             .collect();
         json!({"accounts": accounts, "recent": s.recent}).to_string()
@@ -558,8 +735,7 @@ impl Daemon {
             let s = self.state.lock().unwrap();
             (s.accounts[account].dir.clone(), s.accounts[account].sync_dir.clone())
         };
-        let config = std::fs::read_to_string(confdir.join("config")).unwrap_or_default();
-        let excluded: BTreeSet<String> = config.lines().filter_map(managed_exclude).collect();
+        let excluded = excluded_folders(&confdir);
         // shortcut: lists folders present on this PC only; online-only folders need a Graph API listing
         let mut names: BTreeSet<String> = std::fs::read_dir(&sync)
             .into_iter()
@@ -618,11 +794,37 @@ impl Daemon {
         self.update(|s| {
             let a = s.accounts.get_mut(account).expect("checked");
             a.sync_dir = self::sync_dir(&confdir);
+            a.excluded = excluded_folders(&confdir);
             // onedrive refuses to start after these changes until it has rebuilt its database
             a.resync_next |= result.is_ok();
         });
         self.resume_account(account);
         result.map_err(|e| fdo::Error::Failed(format!("Cannot write {}: {e}", config_path.display())))
+    }
+
+    /// Create a new account in ~/.config/onedrive/accounts/<name> syncing to `sync_dir`; then SignIn.
+    fn add_account(&self, name: &str, sync_dir: &str) -> fdo::Result<()> {
+        if !valid_account_name(name) {
+            return Err(fdo::Error::InvalidArgs("Use the account's email address as its name".into()));
+        }
+        let others: Vec<String> = self.state.lock().unwrap().accounts.values().map(|a| a.sync_dir.clone()).collect();
+        check_new_sync_dir(sync_dir, &others).map_err(fdo::Error::InvalidArgs)?;
+        let dir = config_base().join("accounts").join(name);
+        if dir.exists() || self.state.lock().unwrap().accounts.contains_key(name) {
+            return Err(fdo::Error::InvalidArgs(format!("An account named {name} already exists")));
+        }
+        // the account folder will hold its sign-in token: private to this user
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .and_then(|_| std::fs::write(dir.join("config"), format!("sync_dir = \"{sync_dir}\"\n")))
+            .map_err(|e| fdo::Error::Failed(format!("Cannot create {}: {e}", dir.display())))?;
+        self.update(|s| {
+            let a = Account { sync_dir: sync_dir.to_string(), dir, status: "signedout", needs_auth: true, ..Default::default() };
+            s.accounts.insert(name.to_string(), a);
+        });
+        Ok(())
     }
 
     #[zbus(signal)]
@@ -631,11 +833,8 @@ impl Daemon {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // no accounts yet is fine: the GUI can add one
     let accounts = discover();
-    if accounts.is_empty() {
-        eprintln!("No onedrive accounts found in {}", config_base().display());
-        std::process::exit(1);
-    }
 
     let conn = zbus::Connection::session().await?;
     let daemon = Daemon { state: Arc::default(), conn: conn.clone() };
@@ -643,6 +842,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let needs_auth = !signed_in(dir);
         let a = Account {
             sync_dir: sync_dir(dir),
+            excluded: excluded_folders(dir),
             dir: dir.clone(),
             status: if needs_auth { "signedout" } else { "starting" },
             needs_auth,
@@ -711,9 +911,37 @@ mod tests {
             parse("Client requires authentication before proceeding. Waiting for --auth-files elements to be available."),
             Some(Event::AuthWaiting)
         );
+        assert_eq!(
+            parse("Downloading: Videos/big.mp4 ... 45%  |  ETA    00:00:12"),
+            Some(Event::Progress { path: "Videos/big.mp4".into(), percent: 45 })
+        );
+        assert_eq!(
+            parse("Uploading: ./a ... b.iso ... 100% | DONE in 00:01:02"),
+            Some(Event::Progress { path: "./a ... b.iso".into(), percent: 100 })
+        );
+        assert_eq!(parse("Number of items to download from Microsoft OneDrive: 12"), Some(Event::Planned(12)));
+        assert_eq!(parse("New items to upload to Microsoft OneDrive: 3"), Some(Event::Planned(3)));
+        assert_eq!(parse_quota("Used:      0.15 GB (161061273 bytes)"), Some(("Used", 161061273)));
+        assert_eq!(parse_quota("Total:     5 GB (5368709120 bytes)"), Some(("Total", 5368709120)));
+        assert_eq!(parse_quota("Deleted:   0 GB (0 bytes)"), None);
         // in-progress transfer without result, and noise
         assert_eq!(parse("Downloading file: big.iso ... "), None);
         assert_eq!(parse("Processing API Response Bundle: 1"), None);
+    }
+
+    #[test]
+    fn counts_progress() {
+        let mut s = State::default();
+        s.accounts.insert("a".into(), Account::default());
+        s.apply("a", Event::Planned(2));
+        s.apply("a", Event::Progress { path: "big".into(), percent: 40 });
+        assert_eq!((s.accounts["a"].current.as_str(), s.accounts["a"].percent), ("big", 40));
+        s.apply("a", Event::Transfer { action: "download", path: "big".into(), ok: true });
+        s.apply("a", Event::Transfer { action: "delete-local", path: "x".into(), ok: true });
+        let a = &s.accounts["a"];
+        assert_eq!((a.planned, a.transferred, a.current.as_str()), (2, 1, ""));
+        s.apply("a", Event::Synced);
+        assert_eq!((s.accounts["a"].planned, s.accounts["a"].transferred), (0, 0));
     }
 
     #[test]
@@ -745,6 +973,8 @@ mod tests {
         assert_eq!(managed_exclude("skip_dir = \"/Docs/Sub\""), None);
         assert_eq!(managed_exclude("skip_dir = \"Docs\""), None);
         assert!(!valid_folder_name("a|b") && !valid_folder_name("x*") && valid_folder_name("My Files"));
+        assert!(valid_account_name("me@outlook.com") && !valid_account_name("../x") && !valid_account_name(".hidden"));
+        assert!(!valid_account_name("a b") && !valid_account_name(""));
     }
 
     #[test]

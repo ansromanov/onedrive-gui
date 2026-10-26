@@ -13,7 +13,7 @@ A=$tmp/onedrive/accounts/$acct N=$tmp/onedrive/accounts/$new
 mkdir -p "$A" "$N" "$tmp/sync/Docs" "$tmp/run"
 echo token > "$A/refresh_token"
 printf 'sync_dir = "%s"\nskip_dir = "*.tmp"\n' "$tmp/sync" > "$A/config"
-export XDG_CONFIG_HOME=$tmp XDG_RUNTIME_DIR=$tmp/run ONEDRIVE_BIN=$here/fake-onedrive FAKE_LOG=$tmp/fake.log
+export XDG_CONFIG_HOME=$tmp XDG_RUNTIME_DIR=$tmp/run ONEDRIVE_BIN=$here/fake-onedrive FAKE_LOG=$tmp/fake.log FAKE_CRASH=$tmp/crash
 
 "$here/../target/debug/onedrive-gui-daemon" &
 daemon=$!
@@ -24,13 +24,14 @@ wait_for() {
     for _ in $(seq 50); do call State 2>/dev/null | grep -qE "$1" && return; sleep 0.1; done
     fail "state never matched $1"
 }
-status() { echo "\"name\":\"$1\",\"pausedUntil\":[0-9]+,\"status\":\"$2\""; }
+status() { echo "\"name\":\"$1\",\"pausedUntil\":[0-9]+,[^}]*\"status\":\"$2\""; }
 last_args() { grep "^args: .*$1" "$FAKE_LOG" | tail -1; }
 
 # --- monitor, pause, resume
 wait_for "$(status $acct synced)"
 call State | grep -q '"action":"download","ok":true,"path":"Docs/a.txt"' || fail "download not in recent"
 call State | grep -q '"action":"conflict","ok":true,"path":"./db-pc-safeBackup-0001.kdbx"' || fail "conflict not flagged"
+call State | grep -q '"quotaTotal":5368709120,"quotaUsed":161061273' || fail "quota not read"
 
 call Pause "$acct" 0 >/dev/null
 call State | grep -qE "$(status $acct paused)" || fail "pause not shown immediately"
@@ -44,6 +45,13 @@ call State | grep -qE "$(status $acct paused)" || fail "timed pause not shown"
 wait_for "$(status $acct synced)" # auto-resume after 2s
 
 call Pause nobody 0 >/dev/null 2>&1 && fail "unknown account accepted"
+
+# --- crash: stopped, restarted on its own after the first backoff step (10s)
+touch "$tmp/crash"
+call Pause "$acct" 0 >/dev/null; sleep 0.5; call Resume "$acct" >/dev/null
+wait_for "\"retryAt\":[1-9][0-9]*,\"status\":\"stopped\""
+for _ in $(seq 150); do call State | grep -qE "$(status $acct synced)" && break; sleep 0.1; done
+call State | grep -qE "$(status $acct synced)" || fail "not restarted after crash"
 
 # --- sign-in for an account without a token
 call State | grep -qE "$(status $new signedout)" || fail "account without token not signed out"
@@ -64,6 +72,7 @@ cmp -s "$A/config.onedrive-gui.bak" <(printf 'sync_dir = "%s"\nskip_dir = "*.tmp
 wait_for "$(status $acct synced)"
 [[ $(last_args $acct) == *"--resync --resync-auth" ]] || fail "no resync after settings change"
 call Folders "$acct" | grep -q '"excluded":true,"name":"Docs"' || fail "Docs not shown excluded"
+call State | grep -q '"excluded":\["Docs"\]' || fail "excluded not in state"
 
 call Pause "$acct" 0 >/dev/null; sleep 0.5; call Resume "$acct" >/dev/null
 wait_for "$(status $acct synced)"
@@ -79,6 +88,17 @@ grep -qx "sync_dir = \"$tmp/newsync\"" "$A/config" || fail "sync_dir not written
 call State | grep -q "\"syncDir\":\"$tmp/newsync\"" || fail "new sync dir not reported"
 wait_for "$(status $acct synced)"
 
+# --- add an account
+call AddAccount 'added@example.com' "$tmp/added" >/dev/null
+D=$tmp/onedrive/accounts/added@example.com
+[[ $(stat -c %a "$D") == 700 ]] || fail "new account dir not private"
+cmp -s "$D/config" <(printf 'sync_dir = "%s"\n' "$tmp/added") || fail "new account config wrong"
+call State | grep -qE "$(status added@example.com signedout)" || fail "new account not signed out"
+call AddAccount 'added@example.com' "$tmp/added2" >/dev/null 2>&1 && fail "duplicate account accepted"
+call AddAccount '../evil' "$tmp/evil" >/dev/null 2>&1 && fail "bad account name accepted"
+call AddAccount 'x@example.com' "$tmp/sync" >/dev/null 2>&1 && fail "overlapping sync folder accepted"
+[[ ! -e $tmp/onedrive/accounts/x@example.com ]] || fail "rejected account left a folder"
+
 # --- clean shutdown
 kill -TERM "$daemon"
 wait "$daemon" || fail "daemon exit code $?"
@@ -91,6 +111,7 @@ pgrep -f "$here/fake-onedrive" >/dev/null && fail "onedrive left running"
 while read -r line; do
     case $line in
     "args: --monitor --confdir $A" | "args: --monitor --confdir $N") ;;
+    "args: --confdir $A --display-quota" | "args: --confdir $N --display-quota") ;;
     "args: --monitor --confdir $A --resync --resync-auth") ;;
     "args: --confdir $N --reauth --auth-files $tmp/run/onedrive-gui/new_example_com/auth-url:$tmp/run/onedrive-gui/new_example_com/response-url") ;;
     *) fail "unexpected onedrive args: $line" ;;
