@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=OneDrive
+Comment=OneDrive sync status and settings
+Exec=@CMAKE_INSTALL_FULL_BINDIR@/onedrive-gui
+Icon=folder-cloud
+Categories=Network;FileTransfer;
+X-GNOME-Autostart-enabled=true

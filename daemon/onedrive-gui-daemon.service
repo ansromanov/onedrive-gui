@@ -1,0 +1,14 @@
+[Unit]
+Description=OneDrive GUI daemon (supervises onedrive --monitor)
+After=network-online.target
+# Two onedrive instances on one account must never run together.
+Conflicts=onedrive.service
+
+[Service]
+ExecStart=%h/.local/bin/onedrive-gui-daemon
+Restart=on-failure
+# onedrive gets SIGTERM and time to finish cleanly before systemd's last-resort kill.
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

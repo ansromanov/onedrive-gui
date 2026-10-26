@@ -1,0 +1,30 @@
+#!/bin/sh
+# Stand-in for onedrive in smoke tests: logs args and how each run ended ("end:" lines;
+# a run without one was killed uncleanly), prints real-format lines.
+echo "args: $*" >> "$FAKE_LOG"
+trap 'echo "end: TERM" >> "$FAKE_LOG"; echo "Sync with Microsoft OneDrive was interrupted (SIGTERM)"; exit 0' TERM
+
+case " $* " in
+*" --reauth "*)
+    # --confdir DIR --reauth --auth-files URLFILE:RESPONSEFILE
+    confdir=$2 url_file=${5%%:*} resp_file=${5#*:}
+    printf 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=fake' > "$url_file"
+    echo "Client requires authentication before proceeding. Waiting for --auth-files elements to be available."
+    while [ ! -f "$resp_file" ]; do sleep 0.1 & wait $!; done
+    grep -q 'code=' "$resp_file" && echo token > "$confdir/refresh_token"
+    rm -f "$url_file" "$resp_file"
+    echo "end: auth" >> "$FAKE_LOG"
+    exit 0
+    ;;
+esac
+
+if [ ! -s "$3/refresh_token" ]; then
+    echo "You will need to issue a --reauth and re-authorise this client to obtain a fresh auth token."
+    echo "end: notoken" >> "$FAKE_LOG"
+    exit 1
+fi
+echo "Starting a sync with Microsoft OneDrive"
+echo "Downloading file: Docs/a.txt ... done"
+echo "Uploading new file: ./db-pc-safeBackup-0001.kdbx ... done"
+echo "Sync with Microsoft OneDrive is complete"
+while :; do sleep 1 & wait $!; done
