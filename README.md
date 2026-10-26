@@ -2,6 +2,8 @@
 
 Windows-style tray + activity flyout for [abraunegg/onedrive](https://github.com/abraunegg/onedrive).
 
+<img src="docs/flyout.png" alt="Activity flyout" height="440"> <img src="docs/settings.png" alt="Settings" height="440">
+
 - `daemon/` (Rust): runs one `onedrive --monitor --confdir <account>` per authorised account, parses its output, serves status on D-Bus (`org.onedrivegui.Daemon`).
 - `app/` (C++/Qt6/QML): tray icon, flyout, settings and notifications; talks only to the daemon.
   `onedrive-gui --settings` opens Settings (in the running instance if there is one).
