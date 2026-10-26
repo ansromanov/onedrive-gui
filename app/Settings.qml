@@ -1,4 +1,5 @@
 pragma ComponentBehavior: Bound
+import QtCore
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
@@ -39,6 +40,8 @@ ApplicationWindow {
     function say(text, isError) { message = text; messageIsError = isError }
 
     onAuthUrlChanged: if (authUrl) Qt.openUrlExternally(authUrl)
+    // opened before the daemon's first answer (e.g. `onedrive-gui --settings` at startup)
+    onAccountsChanged: if (!acct && accounts.length) { account = accounts[0].name; load() }
 
     Connections {
         target: win.backend
@@ -55,6 +58,47 @@ ApplicationWindow {
             win.load()
             win.say(qsTr("Saved. OneDrive is re-checking your files against OneDrive."), false)
         }
+    }
+
+    function addAccount() { newName.text = ""; newDir.text = ""; adder.open() }
+
+    Connections {
+        target: win.backend
+        function onAccountAdded(name) {
+            win.account = name
+            win.load()
+            win.say("", false)
+            win.backend.signIn(name)
+        }
+    }
+
+    Dialog {
+        id: adder
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 440)
+        modal: true
+        title: qsTr("Add an account")
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        readonly property string home: decodeURIComponent(StandardPaths.writableLocation(StandardPaths.HomeLocation).toString().replace(/^file:\/\//, ""))
+        readonly property string dir: newDir.text || (newName.text ? home + "/OneDrive_" + newName.text : "")
+        ColumnLayout {
+            width: parent.width
+            Label { text: qsTr("Microsoft account email") }
+            TextField { id: newName; Layout.fillWidth: true; placeholderText: "name@outlook.com"; inputMethodHints: Qt.ImhEmailCharactersOnly }
+            Label { text: qsTr("Folder on this PC (must be empty or new)") }
+            RowLayout {
+                Layout.fillWidth: true
+                TextField { id: newDir; Layout.fillWidth: true; placeholderText: adder.dir }
+                Button { text: qsTr("Browse…"); onClicked: newPicker.open() }
+            }
+        }
+        onAccepted: if (newName.text) win.backend.addAccount(newName.text.trim(), adder.dir)
+    }
+
+    FolderDialog {
+        id: newPicker
+        title: qsTr("Choose an empty folder for OneDrive")
+        onAccepted: newDir.text = decodeURIComponent(selectedFolder.toString().replace(/^file:\/\//, ""))
     }
 
     FolderDialog {
@@ -89,12 +133,17 @@ ApplicationWindow {
         anchors.margins: 16
         spacing: 12
 
-        ComboBox {
+        RowLayout {
             Layout.fillWidth: true
-            visible: win.accounts.length > 1
-            model: win.accounts.map(a => a.name)
-            currentIndex: model.indexOf(win.account)
-            onActivated: { win.account = currentText; win.message = ""; win.load() }
+            ComboBox {
+                Layout.fillWidth: true
+                visible: win.accounts.length > 1
+                model: win.accounts.map(a => a.name)
+                currentIndex: model.indexOf(win.account)
+                onActivated: { win.account = currentText; win.message = ""; win.load() }
+            }
+            Item { Layout.fillWidth: true; visible: win.accounts.length <= 1 }
+            Button { text: qsTr("Add account…"); onClicked: win.addAccount() }
         }
 
         GroupBox {
@@ -102,7 +151,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             ColumnLayout {
                 anchors.fill: parent
-                Label { text: win.account; font.weight: Font.DemiBold }
+                Label { text: win.account || qsTr("No account yet. Add one to start syncing."); font.weight: Font.DemiBold }
 
                 Label {
                     visible: win.acct !== null && win.acct.status === "signedout"

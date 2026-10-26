@@ -1,0 +1,6 @@
+{
+    "KPlugin": {
+        "Name": "OneDrive sync status",
+        "Description": "Shows OneDrive sync state on files"
+    }
+}

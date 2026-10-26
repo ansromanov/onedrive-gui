@@ -9,11 +9,15 @@
 #include <QDBusServiceWatcher>
 #include <QDesktopServices>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QJsonDocument>
 #include <QMenu>
 #include <QQmlApplicationEngine>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QScreen>
+#include <QSet>
+#include <QStandardPaths>
 #include <QSystemTrayIcon>
 #include <QUrl>
 
@@ -27,6 +31,7 @@
 static const QString Service = QStringLiteral("org.onedrivegui.Daemon");
 static const QString Path = QStringLiteral("/org/onedrivegui/Daemon");
 static const QString Iface = QStringLiteral("org.onedrivegui.Daemon1");
+static const QString AppService = QStringLiteral("org.onedrivegui.App");
 
 class Backend : public QObject
 {
@@ -69,6 +74,13 @@ public:
     Q_INVOKABLE void open(const QString &localPath) { QDesktopServices::openUrl(QUrl::fromLocalFile(localPath)); }
     Q_INVOKABLE void signIn(const QString &account) { call(QStringLiteral("SignIn"), {account}); }
     Q_INVOKABLE void signInResponse(const QString &account, const QString &url) { call(QStringLiteral("SignInResponse"), {account, url}); }
+    Q_INVOKABLE void addAccount(const QString &account, const QString &syncDir)
+    {
+        call(QStringLiteral("AddAccount"), {account, syncDir}, [this, account](const QDBusMessage &reply) {
+            if (reply.type() == QDBusMessage::ReplyMessage)
+                emit accountAdded(account);
+        });
+    }
     Q_INVOKABLE void openSettings(const QString &account) { emit settingsRequested(account); }
 
     Q_INVOKABLE QVariantMap folders(const QString &account)
@@ -97,6 +109,7 @@ signals:
     void failed(const QString &message);
     void settingsApplied();
     void settingsRequested(const QString &account);
+    void accountAdded(const QString &account);
 
 public slots:
     void refresh()
@@ -130,6 +143,60 @@ private:
     QVariantMap m_state;
 };
 
+// Lets a second launch (e.g. `onedrive-gui --settings`) reach the running instance instead of adding a second tray icon.
+class App : public QObject
+{
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.onedrivegui.App1")
+public:
+    std::function<void()> activity, settings;
+public slots:
+    Q_SCRIPTABLE void ShowActivity() { activity(); }
+    Q_SCRIPTABLE void ShowSettings() { settings(); }
+};
+
+// Panel edge the tray lives on: from the screen's reserved area where the platform reports it (X11),
+// else from Plasma's panel config (Wayland reports none). Qt::BottomEdge if unknown.
+static Qt::Edge panelEdge()
+{
+    if (QScreen *s = QGuiApplication::primaryScreen(); s && s->availableGeometry() != s->geometry()) {
+        const QRect g = s->geometry(), a = s->availableGeometry();
+        if (a.top() > g.top())
+            return Qt::TopEdge;
+        if (a.left() > g.left())
+            return Qt::LeftEdge;
+        if (a.right() < g.right())
+            return Qt::RightEdge;
+        return Qt::BottomEdge;
+    }
+    // [Containments][N] location=3 top, 4 bottom, 5 left, 6 right; the panel holding the system tray wins
+    QFile f(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QStringLiteral("/plasma-org.kde.plasma.desktop-appletsrc"));
+    if (!f.open(QIODevice::ReadOnly))
+        return Qt::BottomEdge;
+    static const QRegularExpression group(QStringLiteral(R"(^\[Containments\]\[(\d+)\](.*)$)"));
+    QHash<QString, int> location;
+    QString current, trayPanel;
+    bool inContainment = false;
+    while (!f.atEnd()) {
+        const QString line = QString::fromUtf8(f.readLine()).trimmed();
+        if (line.startsWith(u'[')) {
+            const auto m = group.match(line);
+            current = m.hasMatch() ? m.captured(1) : QString();
+            inContainment = m.hasMatch() && m.captured(2).isEmpty();
+        } else if (inContainment && line.startsWith(QStringLiteral("location="))) {
+            location[current] = line.mid(9).toInt();
+        } else if (!current.isEmpty() && line == QStringLiteral("plugin=org.kde.plasma.systemtray")) {
+            trayPanel = current;
+        }
+    }
+    switch (location.value(trayPanel, 4)) {
+    case 3: return Qt::TopEdge;
+    case 5: return Qt::LeftEdge;
+    case 6: return Qt::RightEdge;
+    default: return Qt::BottomEdge;
+    }
+}
+
 static bool useLayerShell(QWindow *win)
 {
 #ifdef HAVE_LAYERSHELL
@@ -139,9 +206,11 @@ static bool useLayerShell(QWindow *win)
         return false;
     auto *lw = LayerShellQt::Window::get(win);
     lw->setLayer(LayerShellQt::Window::LayerTop);
-    // shortcut: always bottom-right like Windows; read the panel position if top panels need it
-    lw->setAnchors({LayerShellQt::Window::AnchorBottom | LayerShellQt::Window::AnchorRight});
-    lw->setMargins({0, 0, 12, 12});
+    // in the corner next to the tray, right side like Windows unless the panel is on the left
+    const Qt::Edge edge = panelEdge();
+    lw->setAnchors({(edge == Qt::TopEdge ? LayerShellQt::Window::AnchorTop : LayerShellQt::Window::AnchorBottom)
+                    | (edge == Qt::LeftEdge ? LayerShellQt::Window::AnchorLeft : LayerShellQt::Window::AnchorRight)});
+    lw->setMargins({12, 12, 12, 12});
     lw->setKeyboardInteractivity(LayerShellQt::Window::KeyboardInteractivityOnDemand);
     lw->setScope(QStringLiteral("onedrive-gui"));
     return true;
@@ -192,11 +261,75 @@ static QString tooltipFor(const QString &overall)
     return QObject::tr("OneDrive GUI daemon isn't running");
 }
 
+static QString fileName(const QVariantMap &r)
+{
+    return r.value(QStringLiteral("path")).toString().section(u'/', -1);
+}
+
+// Desktop notifications for conflicts, failed files and accounts that stop syncing; `warned` holds accounts
+// already notified about, until they sync again, so a crash-restart loop notifies once.
+static void notifyChanges(const QVariantMap &before, const QVariantMap &after, QSet<QString> &warned, QSystemTrayIcon &tray)
+{
+    // first state after the app or the daemon starts: nothing in it is new
+    if (before.isEmpty() || after.isEmpty())
+        return;
+    const auto oldRecent = before.value(QStringLiteral("recent")).toList();
+    const QVariant top = oldRecent.isEmpty() ? QVariant() : oldRecent.first();
+    QStringList conflicts, failures;
+    for (const auto &v : after.value(QStringLiteral("recent")).toList()) {
+        if (v == top)
+            break;
+        const auto r = v.toMap();
+        if (!r.value(QStringLiteral("ok")).toBool())
+            failures << fileName(r);
+        else if (r.value(QStringLiteral("action")) == QStringLiteral("conflict"))
+            conflicts << fileName(r);
+    }
+    QStringList messages;
+    if (conflicts.size() == 1)
+        messages << QObject::tr("Conflict in %1: both copies were kept.").arg(conflicts.first());
+    else if (conflicts.size() > 1)
+        messages << QObject::tr("%1 files had conflicts: both copies were kept.").arg(conflicts.size());
+    if (failures.size() == 1)
+        messages << QObject::tr("Couldn't sync %1.").arg(failures.first());
+    else if (failures.size() > 1)
+        messages << QObject::tr("Couldn't sync %1 files.").arg(failures.size());
+
+    for (const auto &v : after.value(QStringLiteral("accounts")).toList()) {
+        const auto a = v.toMap();
+        const QString name = a.value(QStringLiteral("name")).toString(), status = a.value(QStringLiteral("status")).toString();
+        if (status == QStringLiteral("synced") || status == QStringLiteral("paused") || status == QStringLiteral("syncing")) {
+            warned.remove(name);
+            continue;
+        }
+        if (warned.contains(name))
+            continue;
+        if (status == QStringLiteral("signedout"))
+            messages << QObject::tr("You're signed out of %1. Sign in to keep syncing.").arg(name);
+        else if (status == QStringLiteral("stopped") || status == QStringLiteral("error"))
+            messages << QObject::tr("Sync problem with %1: %2").arg(name, a.value(QStringLiteral("error")).toString());
+        else
+            continue;
+        warned.insert(name);
+    }
+    if (!messages.isEmpty())
+        tray.showMessage(QStringLiteral("OneDrive"), messages.join(u'\n'), QSystemTrayIcon::Warning);
+}
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("onedrive-gui"));
     app.setQuitOnLastWindowClosed(false);
+    const bool wantSettings = app.arguments().contains(QStringLiteral("--settings"));
+
+    // already running: hand the request to it
+    if (!QDBusConnection::sessionBus().registerService(AppService)) {
+        auto msg = QDBusMessage::createMethodCall(AppService, QStringLiteral("/App"), QStringLiteral("org.onedrivegui.App1"),
+                                                  wantSettings ? QStringLiteral("ShowSettings") : QStringLiteral("ShowActivity"));
+        QDBusConnection::sessionBus().call(msg);
+        return 0;
+    }
 
     Backend backend;
     QQmlApplicationEngine engine;
@@ -227,6 +360,14 @@ int main(int argc, char *argv[])
         win->requestActivate();
     };
 
+    App appObject;
+    appObject.activity = [&] {
+        if (!win->isVisible())
+            toggle();
+    };
+    appObject.settings = [&] { backend.openSettings({}); };
+    QDBusConnection::sessionBus().registerObject(QStringLiteral("/App"), &appObject, QDBusConnection::ExportScriptableSlots);
+
     QSystemTrayIcon tray;
     QMenu menu;
     menu.addAction(QObject::tr("Show activity"), toggle);
@@ -237,14 +378,21 @@ int main(int argc, char *argv[])
         if (reason == QSystemTrayIcon::Trigger)
             toggle();
     });
+    QVariantMap lastState;
+    QSet<QString> warned;
     auto updateTray = [&] {
         const QString overall = backend.overall();
         tray.setIcon(iconFor(overall));
         tray.setToolTip(QStringLiteral("OneDrive – ") + tooltipFor(overall));
+        notifyChanges(lastState, backend.state(), warned, tray);
+        lastState = backend.state();
     };
     QObject::connect(&backend, &Backend::changed, updateTray);
+    QObject::connect(&tray, &QSystemTrayIcon::messageClicked, appObject.activity);
     updateTray();
     tray.show();
+    if (wantSettings)
+        backend.openSettings({});
 
     return app.exec();
 }

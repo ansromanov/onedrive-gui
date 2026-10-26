@@ -1,0 +1,31 @@
+# Builds from this checkout: cd packaging/arch && makepkg -si
+pkgname=onedrive-gui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Windows-style tray app, settings and Dolphin sync overlays for abraunegg/onedrive"
+arch=(x86_64)
+url="https://github.com/abraunegg/onedrive"
+license=(unknown)
+depends=(onedrive qt6-base qt6-declarative layer-shell-qt kio)
+makedepends=(cargo cmake ninja)
+install=onedrive-gui.install
+
+_src() { realpath "$startdir/../.."; }
+
+build() {
+    cargo build --release --locked --manifest-path "$(_src)/daemon/Cargo.toml" --target-dir "$srcdir/target"
+    for part in app dolphin; do
+        cmake -S "$(_src)/$part" -B "$srcdir/$part" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+        cmake --build "$srcdir/$part"
+    done
+}
+
+package() {
+    for part in app dolphin; do
+        DESTDIR="$pkgdir" cmake --install "$srcdir/$part"
+    done
+    install -Dm755 "$srcdir/target/release/onedrive-gui-daemon" "$pkgdir/usr/bin/onedrive-gui-daemon"
+    install -d "$pkgdir/usr/lib/systemd/user" "$pkgdir/etc/xdg/autostart"
+    sed 's|%h/.local/bin/|/usr/bin/|' "$(_src)/daemon/onedrive-gui-daemon.service" > "$pkgdir/usr/lib/systemd/user/onedrive-gui-daemon.service"
+    install -m644 "$pkgdir/usr/share/applications/onedrive-gui.desktop" "$pkgdir/etc/xdg/autostart/onedrive-gui.desktop"
+}

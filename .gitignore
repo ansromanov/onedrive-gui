@@ -1,2 +1,5 @@
 daemon/target/
 app/build*/
+dolphin/build/
+packaging/arch/*/
+packaging/arch/*.pkg.tar.*

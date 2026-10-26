@@ -1,0 +1,4 @@
+post_install() {
+    echo "Start syncing: systemctl --user enable --now onedrive-gui-daemon"
+    echo "Don't run onedrive.service or onedrive@.service for the same accounts alongside it."
+}

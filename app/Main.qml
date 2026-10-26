@@ -23,17 +23,28 @@ Window {
     function statusText(a) {
         switch (a.status) {
         case "synced": return qsTr("Your files are synced")
-        case "syncing": return qsTr("Syncing files…")
+        case "syncing":
+            return a.planned > 0 && a.transferred < a.planned
+                ? qsTr("Syncing files… %1 of %2").arg(a.transferred + 1).arg(a.planned)
+                : qsTr("Syncing files…")
         case "starting": return qsTr("Starting…")
         case "paused":
             return a.pausedUntil > 0
-                ? qsTr("Paused until %1").arg(new Date(a.pausedUntil * 1000).toLocaleTimeString(Qt.locale(), Locale.ShortFormat))
+                ? qsTr("Paused until %1").arg(time(a.pausedUntil))
                 : qsTr("Sync is paused")
-        case "stopped": return qsTr("Sync stopped: %1").arg(a.error)
+        case "stopped":
+            return a.retryAt > 0
+                ? qsTr("Sync stopped, trying again at %1: %2").arg(time(a.retryAt)).arg(a.error)
+                : qsTr("Sync stopped: %1").arg(a.error)
         case "signedout": return qsTr("You're signed out")
         case "signingin": return qsTr("Signing in…")
         default: return a.error || qsTr("Sync problem")
         }
+    }
+    function time(t) { return new Date(t * 1000).toLocaleTimeString(Qt.locale(), Locale.ShortFormat) }
+    function gb(bytes) { return (bytes / 1073741824).toLocaleString(Qt.locale(), "f", bytes < 10737418240 ? 1 : 0) }
+    function details(a) {
+        return a.quotaTotal > 0 ? qsTr("%1 · %2 GB of %3 GB used").arg(a.name).arg(gb(a.quotaUsed)).arg(gb(a.quotaTotal)) : a.name
     }
     function statusGlyph(s) { return ({ synced: "✓", syncing: "⟳", starting: "⟳", paused: "⏸" })[s] || "!" }
     function statusColor(s) {
@@ -124,7 +135,20 @@ Window {
                             text: root.statusText(acct.modelData); font.weight: Font.DemiBold
                             wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight
                         }
-                        Label { Layout.fillWidth: true; text: acct.modelData.name; opacity: 0.7; font.pixelSize: 12; elide: Text.ElideRight }
+                        Label { Layout.fillWidth: true; text: root.details(acct.modelData); opacity: 0.7; font.pixelSize: 12; elide: Text.ElideRight }
+                        // big file in progress
+                        Label {
+                            Layout.fillWidth: true
+                            visible: acct.modelData.current !== ""
+                            text: qsTr("%1 · %2%").arg(root.cleanPath(acct.modelData.current).split("/").pop()).arg(acct.modelData.percent)
+                            font.pixelSize: 12; elide: Text.ElideMiddle
+                        }
+                        ProgressBar {
+                            Layout.fillWidth: true
+                            visible: acct.modelData.current !== ""
+                            value: acct.modelData.percent / 100
+                            Accessible.name: qsTr("Transfer progress")
+                        }
                     }
                     Button {
                         visible: acct.modelData.status === "paused" || acct.modelData.status === "stopped"
@@ -178,7 +202,8 @@ Window {
                     anchors.centerIn: parent
                     visible: list.count === 0
                     opacity: 0.7
-                    text: root.accounts.length ? qsTr("No recent activity") : qsTr("The OneDrive GUI daemon isn't running")
+                    text: root.backend.state.accounts === undefined ? qsTr("The OneDrive GUI daemon isn't running")
+                        : root.accounts.length ? qsTr("No recent activity") : qsTr("No account yet: add one in Settings")
                 }
             }
         }
