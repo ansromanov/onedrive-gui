@@ -1,0 +1,50 @@
+name: Release
+
+# A release is a tag `vX.Y.Z` matching the version in daemon/Cargo.toml. It builds the Arch package
+# and creates the GitHub release with it, its checksum and notes made from Conventional Commits.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git github-cli git-cliff rust cmake ninja dbus glib2 \
+            qt6-base qt6-declarative layer-shell-qt kio extra-cmake-modules
+          useradd -m builder
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The tag matches the version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          for found in "$(sed -n 's/^version = "\(.*\)"/\1/p' daemon/Cargo.toml | head -1)" \
+                       "$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)"; do
+            [ "$found" = "$v" ] || { echo "::error::tag $GITHUB_REF_NAME but a version file says $found"; exit 1; }
+          done
+      - name: Tests
+        run: tests/run.sh
+      - name: Package
+        run: |
+          chown -R builder .
+          su builder -c 'cd packaging/arch && makepkg -f --nodeps'
+          cd packaging/arch && sha256sum *.pkg.tar.zst > SHA256SUMS
+      - name: Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git-cliff --latest --strip header > notes.md
+          gh release create "$GITHUB_REF_NAME" packaging/arch/*.pkg.tar.zst packaging/arch/SHA256SUMS \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md

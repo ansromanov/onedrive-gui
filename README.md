@@ -28,6 +28,7 @@ cmake -S app -B app/build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build a
 ## Test
 
 ```sh
+tests/run.sh            # everything below in one go (or `just test`)
 cargo test --manifest-path daemon/Cargo.toml
 daemon/tests/smoke.sh   # real daemon on a private D-Bus with a fake onedrive; no real account involved
 dolphin/tests/check.sh  # overlay plugin against the same setup
@@ -35,23 +36,18 @@ dolphin/tests/check.sh  # overlay plugin against the same setup
 
 ## Install
 
-Arch package (includes the Dolphin plugin): `cd packaging/arch && makepkg -si`, then
-`systemctl --user enable --now onedrive-gui-daemon`. If you installed to `~/.local` before, remove those
-copies first (`~/.local/bin/onedrive-gui*`, `~/.config/systemd/user/onedrive-gui-daemon.service`,
-`~/.config/autostart/onedrive-gui.desktop`): they take precedence over the package.
+```sh
+./install.sh              # Arch: builds and installs the pacman package (with the Dolphin plugin)
+./install.sh --user       # any distro: into ~/.local (no Dolphin plugin)
+./install.sh --uninstall  # remove it (account data and synced files are never touched)
+```
 
-Or by hand into `~/.local` (no Dolphin plugin: Dolphin only loads plugins from system paths):
+It checks for `onedrive` (offers the AUR `onedrive-abraunegg` on Arch), installs build dependencies,
+removes stale `~/.local` copies that would shadow the package, then enables the daemon and starts the tray app.
+`--no-start` skips that; `--yes` skips questions.
 
 Accounts live in `~/.config/onedrive` or `~/.config/onedrive/accounts/<name>/`; add accounts and sign in from Settings.
-
-```sh
-cmake -S app -B app/build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/.local
-cmake --build app/build-release && cmake --install app/build-release
-install -Dm755 daemon/target/release/onedrive-gui-daemon ~/.local/bin/onedrive-gui-daemon
-install -Dm644 daemon/onedrive-gui-daemon.service ~/.config/systemd/user/onedrive-gui-daemon.service
-install -Dm644 ~/.local/share/applications/onedrive-gui.desktop ~/.config/autostart/onedrive-gui.desktop
-systemctl --user daemon-reload && systemctl --user enable --now onedrive-gui-daemon
-```
+Don't run `onedrive.service` or `onedrive@.service` alongside the daemon.
 
 ## Settings changes
 
@@ -66,3 +62,9 @@ onedrive locks its database while running, so per-file state isn't readable. Fil
 their account is fully synced, a warning on conflict copies (`-safeBackup-`), an error if their last transfer
 failed, and nothing if excluded or matched by onedrive's default `skip_file`. Custom `skip_file`/`skip_dir`
 patterns aren't applied to the marks.
+
+## License
+
+MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)).
+
+Releases: tag `vX.Y.Z` (matching `daemon/Cargo.toml` and the PKGBUILD); CI builds the Arch package and publishes it.

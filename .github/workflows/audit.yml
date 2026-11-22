@@ -1,0 +1,26 @@
+name: Audit
+
+# Known vulnerabilities in the daemon's dependencies (RustSec).
+on:
+  push:
+    branches: [main]
+    paths: [daemon/Cargo.lock]
+  pull_request:
+    paths: [daemon/Cargo.lock]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: write
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: daemon

@@ -30,11 +30,18 @@ enum Event {
     Syncing,
     Synced,
     SyncedWithFailures,
-    Transfer { action: &'static str, path: String, ok: bool },
+    Transfer {
+        action: &'static str,
+        path: String,
+        ok: bool,
+    },
     /// Files onedrive announced it is about to transfer.
     Planned(u64),
     /// Big-file transfer progress.
-    Progress { path: String, percent: u32 },
+    Progress {
+        path: String,
+        percent: u32,
+    },
     SignedOut(String),
     AuthWaiting,
     Error(String),
@@ -48,11 +55,20 @@ fn parse(line: &str) -> Option<Event> {
         ("Uploading modified file: ", "upload"),
         ("Downloading file: ", "download"),
         ("Deleting item from Microsoft OneDrive: ", "delete-remote"),
-        ("Deleting online file from Microsoft OneDrive: ", "delete-remote"),
-        ("Deleting online folder from Microsoft OneDrive: ", "delete-remote"),
+        (
+            "Deleting online file from Microsoft OneDrive: ",
+            "delete-remote",
+        ),
+        (
+            "Deleting online folder from Microsoft OneDrive: ",
+            "delete-remote",
+        ),
         ("Deleting local file: ", "delete-local"),
         ("Deleting local directory: ", "delete-local"),
-        ("Moving this local file to the configured 'Recycle Bin': ", "delete-local"),
+        (
+            "Moving this local file to the configured 'Recycle Bin': ",
+            "delete-local",
+        ),
     ];
     let line = line.trim_end();
     for (prefix, action) in TRANSFERS {
@@ -69,44 +85,71 @@ fn parse(line: &str) -> Option<Event> {
             return None;
         };
         // onedrive keeps a conflicting local copy as <name>-<host>-safeBackup-NNNN.<ext> and uploads it
-        let action = if action == "upload" && path.contains("-safeBackup-") { "conflict" } else { action };
-        return Some(Event::Transfer { action, path: path.to_string(), ok });
+        let action = if action == "upload" && path.contains("-safeBackup-") {
+            "conflict"
+        } else {
+            action
+        };
+        return Some(Event::Transfer {
+            action,
+            path: path.to_string(),
+            ok,
+        });
     }
     for prefix in ["Downloading: ", "Uploading: "] {
         // "Downloading: <path> ... 45%  |  ETA    00:00:12" (also "| DONE in ...")
         let Some(i) = line.find(prefix) else { continue };
         let (path, tail) = line[i + prefix.len()..].rsplit_once(" ... ")?;
         let percent = tail.split('%').next()?.trim().parse().ok()?;
-        return Some(Event::Progress { path: path.to_string(), percent });
+        return Some(Event::Progress {
+            path: path.to_string(),
+            percent,
+        });
     }
     for prefix in [
         "Number of items to download from Microsoft OneDrive: ",
         "New items to upload to Microsoft OneDrive: ",
         "Changed local items to upload to Microsoft OneDrive: ",
     ] {
-        if let Some(n) = line.find(prefix).and_then(|i| line[i + prefix.len()..].trim().parse().ok()) {
+        if let Some(n) = line
+            .find(prefix)
+            .and_then(|i| line[i + prefix.len()..].trim().parse().ok())
+        {
             return Some(Event::Planned(n));
         }
     }
-    if line.contains("Starting a sync with Microsoft OneDrive") || line.contains("Syncing changes from Microsoft OneDrive") {
+    if line.contains("Starting a sync with Microsoft OneDrive")
+        || line.contains("Syncing changes from Microsoft OneDrive")
+    {
         Some(Event::Syncing)
     } else if line.contains("Sync with Microsoft OneDrive is complete") {
         Some(Event::Synced)
-    } else if line.contains("Sync with Microsoft OneDrive has completed, however there are items that failed to sync") {
+    } else if line.contains(
+        "Sync with Microsoft OneDrive has completed, however there are items that failed to sync",
+    ) {
         Some(Event::SyncedWithFailures)
     } else if line.contains("Waiting for --auth-files elements to be available") {
         Some(Event::AuthWaiting)
     } else if line.contains("--reauth") {
-        Some(Event::SignedOut(line.trim_start_matches("ERROR: ").to_string()))
+        Some(Event::SignedOut(
+            line.trim_start_matches("ERROR: ").to_string(),
+        ))
     } else {
-        line.find("ERROR: ").map(|i| Event::Error(line[i + 7..].to_string()))
+        line.find("ERROR: ")
+            .map(|i| Event::Error(line[i + 7..].to_string()))
     }
 }
 
 /// `("Total" | "Used", bytes)` from `onedrive --display-quota` output, e.g. "Used:      0.15 GB (161061273 bytes)".
 fn parse_quota(line: &str) -> Option<(&str, u64)> {
     let (key, rest) = line.split_once(':')?;
-    let bytes = rest.split_once('(')?.1.strip_suffix(" bytes)")?.trim().parse().ok()?;
+    let bytes = rest
+        .split_once('(')?
+        .1
+        .strip_suffix(" bytes)")?
+        .trim()
+        .parse()
+        .ok()?;
     matches!(key, "Total" | "Used").then_some((key, bytes))
 }
 
@@ -115,7 +158,9 @@ fn valid_account_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
         && !name.starts_with('.')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || "@._+-".contains(c))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@._+-".contains(c))
 }
 
 fn home() -> PathBuf {
@@ -123,12 +168,19 @@ fn home() -> PathBuf {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Value of a `key = "value"` config line, if this line sets `key`.
 fn config_value(line: &str, key: &str) -> Option<String> {
-    let v = line.trim().strip_prefix(key)?.trim_start().strip_prefix('=')?;
+    let v = line
+        .trim()
+        .strip_prefix(key)?
+        .trim_start()
+        .strip_prefix('=')?;
     Some(v.trim().trim_matches('"').to_string())
 }
 
@@ -146,7 +198,11 @@ fn managed_exclude(line: &str) -> Option<String> {
 
 /// Top-level folders the GUI excluded in an account's config.
 fn excluded_folders(confdir: &Path) -> BTreeSet<String> {
-    std::fs::read_to_string(confdir.join("config")).unwrap_or_default().lines().filter_map(managed_exclude).collect()
+    std::fs::read_to_string(confdir.join("config"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(managed_exclude)
+        .collect()
 }
 
 /// Read `sync_dir` from an account's config the way onedrive does (default `~/OneDrive`).
@@ -167,7 +223,10 @@ fn sync_dir(confdir: &Path) -> String {
 fn rewrite_config(old: &str, new_dir: Option<&str>, excluded: &BTreeSet<String>) -> String {
     let mut lines: Vec<String> = old
         .lines()
-        .filter(|l| !(new_dir.is_some() && config_value(l, "sync_dir").is_some()) && managed_exclude(l).is_none())
+        .filter(|l| {
+            !(new_dir.is_some() && config_value(l, "sync_dir").is_some())
+                && managed_exclude(l).is_none()
+        })
         .map(str::to_string)
         .collect();
     if let Some(d) = new_dir {
@@ -184,14 +243,21 @@ fn check_new_sync_dir(dir: &str, others: &[String]) -> Result<(), String> {
         return Err(format!("Not a usable folder path: {dir}"));
     }
     if path.exists() {
-        let empty = std::fs::read_dir(path).map_err(|e| format!("Cannot read {dir}: {e}"))?.next().is_none();
+        let empty = std::fs::read_dir(path)
+            .map_err(|e| format!("Cannot read {dir}: {e}"))?
+            .next()
+            .is_none();
         if !empty {
-            return Err("Choose an empty folder. Files already in it would be uploaded to OneDrive.".into());
+            return Err(
+                "Choose an empty folder. Files already in it would be uploaded to OneDrive.".into(),
+            );
         }
     }
     for other in others {
         if path.starts_with(other) || Path::new(other).starts_with(path) {
-            return Err(format!("This folder overlaps another account's folder: {other}"));
+            return Err(format!(
+                "This folder overlaps another account's folder: {other}"
+            ));
         }
     }
     Ok(())
@@ -211,9 +277,16 @@ fn discover() -> Vec<(String, PathBuf)> {
     if base.join("refresh_token").exists() || base.join("items.sqlite3").exists() {
         found.push(("default".to_string(), base.clone()));
     }
-    for entry in std::fs::read_dir(base.join("accounts")).into_iter().flatten().flatten() {
+    for entry in std::fs::read_dir(base.join("accounts"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
         if entry.path().is_dir() {
-            found.push((entry.file_name().to_string_lossy().into_owned(), entry.path()));
+            found.push((
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            ));
         }
     }
     found
@@ -290,7 +363,11 @@ impl State {
                 return;
             }
             Event::Progress { path, percent } => {
-                (a.current, a.percent) = if percent < 100 { (path, percent) } else { (String::new(), 0) };
+                (a.current, a.percent) = if percent < 100 {
+                    (path, percent)
+                } else {
+                    (String::new(), 0)
+                };
                 return;
             }
             _ => {}
@@ -320,7 +397,10 @@ impl State {
                 a.status = "error";
                 a.error = msg;
             }
-            Event::Transfer { .. } | Event::Planned(_) | Event::Progress { .. } | Event::AuthWaiting => {}
+            Event::Transfer { .. }
+            | Event::Planned(_)
+            | Event::Progress { .. }
+            | Event::AuthWaiting => {}
         }
     }
 }
@@ -376,8 +456,14 @@ impl Daemon {
         let mut cmd = onedrive();
         match (mode, &auth_dir) {
             (Mode::SignIn, Some(auth)) => {
-                let files = format!("{}:{}", auth.join("auth-url").display(), auth.join("response-url").display());
-                cmd.arg("--confdir").arg(&dir).args(["--reauth", "--auth-files", &files]);
+                let files = format!(
+                    "{}:{}",
+                    auth.join("auth-url").display(),
+                    auth.join("response-url").display()
+                );
+                cmd.arg("--confdir")
+                    .arg(&dir)
+                    .args(["--reauth", "--auth-files", &files]);
             }
             _ => {
                 cmd.arg("--monitor").arg("--confdir").arg(&dir);
@@ -386,7 +472,11 @@ impl Daemon {
                 }
             }
         }
-        let spawned = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+        let spawned = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {
@@ -429,8 +519,14 @@ impl Daemon {
             match parse(&String::from_utf8_lossy(&bytes)) {
                 // onedrive prints this only after it has fully written the URL file
                 Some(Event::AuthWaiting) => {
-                    if let Some(url) = auth_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("auth-url")).ok()) {
-                        self.update(|s| s.accounts.get_mut(&name).expect("known account").auth_url = url.trim().to_string());
+                    if let Some(url) = auth_dir
+                        .as_ref()
+                        .and_then(|d| std::fs::read_to_string(d.join("auth-url")).ok())
+                    {
+                        self.update(|s| {
+                            s.accounts.get_mut(&name).expect("known account").auth_url =
+                                url.trim().to_string()
+                        });
                     }
                 }
                 Some(event) => self.update(|s| s.apply(&name, event)),
@@ -531,7 +627,13 @@ impl Daemon {
             .stderr(Stdio::null())
             .spawn();
         if let Ok(mut child) = spawned {
-            self.state.lock().unwrap().accounts.get_mut(name).expect("known account").pid = child.id();
+            self.state
+                .lock()
+                .unwrap()
+                .accounts
+                .get_mut(name)
+                .expect("known account")
+                .pid = child.id();
             let mut lines = BufReader::new(child.stdout.take().expect("piped")).lines();
             let (mut used, mut total) = (0, 0);
             let read = async {
@@ -543,7 +645,9 @@ impl Daemon {
                     }
                 }
             };
-            if tokio::time::timeout(Duration::from_secs(60), read).await.is_err()
+            if tokio::time::timeout(Duration::from_secs(60), read)
+                .await
+                .is_err()
                 && let Some(pid) = child.id()
             {
                 terminate(pid);
@@ -606,7 +710,9 @@ impl Daemon {
         if self.state.lock().unwrap().accounts.contains_key(account) {
             Ok(())
         } else {
-            Err(fdo::Error::InvalidArgs(format!("unknown account: {account}")))
+            Err(fdo::Error::InvalidArgs(format!(
+                "unknown account: {account}"
+            )))
         }
     }
 }
@@ -641,7 +747,11 @@ impl Daemon {
             a.paused = true;
             a.status = "paused";
             a.pause_gen += 1;
-            a.paused_until = if seconds > 0 { now() + u64::from(seconds) } else { 0 };
+            a.paused_until = if seconds > 0 {
+                now() + u64::from(seconds)
+            } else {
+                0
+            };
             if let Some(pid) = a.pid
                 && !a.stopping
             {
@@ -672,8 +782,13 @@ impl Daemon {
     /// Start the browser sign-in; the URL to open appears as `authUrl` in State. Cancel with Pause.
     fn sign_in(&self, account: &str) -> fdo::Result<()> {
         self.check(account)?;
-        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let safe_name: String = account.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let safe_name: String = account
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
         // holds the sign-in code: private to this user
         let auth_dir = base.join("onedrive-gui").join(safe_name);
         let _ = std::fs::remove_dir_all(&auth_dir);
@@ -681,8 +796,12 @@ impl Daemon {
             .recursive(true)
             .mode(0o700)
             .create(&auth_dir)
-            .and_then(|_| std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o700)))
-            .map_err(|e| fdo::Error::Failed(format!("Cannot create {}: {e}", auth_dir.display())))?;
+            .and_then(|_| {
+                std::fs::set_permissions(&auth_dir, std::fs::Permissions::from_mode(0o700))
+            })
+            .map_err(|e| {
+                fdo::Error::Failed(format!("Cannot create {}: {e}", auth_dir.display()))
+            })?;
         let busy = self.update(|s| {
             let a = s.accounts.get_mut(account).expect("checked");
             if a.running {
@@ -698,7 +817,9 @@ impl Daemon {
             false
         });
         if busy {
-            return Err(fdo::Error::Failed("Pause syncing before signing in again".into()));
+            return Err(fdo::Error::Failed(
+                "Pause syncing before signing in again".into(),
+            ));
         }
         tokio::spawn(self.clone().run(account.to_string(), Mode::SignIn));
         Ok(())
@@ -733,7 +854,10 @@ impl Daemon {
         self.check(account)?;
         let (confdir, sync) = {
             let s = self.state.lock().unwrap();
-            (s.accounts[account].dir.clone(), s.accounts[account].sync_dir.clone())
+            (
+                s.accounts[account].dir.clone(),
+                s.accounts[account].sync_dir.clone(),
+            )
         };
         let excluded = excluded_folders(&confdir);
         // shortcut: lists folders present on this PC only; online-only folders need a Graph API listing
@@ -754,13 +878,28 @@ impl Daemon {
 
     /// Change the sync folder and/or excluded top-level folders. Stops onedrive, rewrites its config
     /// (backup kept as config.onedrive-gui.bak), then restarts it with a one-time --resync.
-    async fn apply_settings(&self, account: &str, sync_dir: &str, excluded: Vec<String>) -> fdo::Result<()> {
+    async fn apply_settings(
+        &self,
+        account: &str,
+        sync_dir: &str,
+        excluded: Vec<String>,
+    ) -> fdo::Result<()> {
         self.check(account)?;
         let (confdir, current, others, busy) = {
             let s = self.state.lock().unwrap();
             let a = &s.accounts[account];
-            let others: Vec<String> = s.accounts.iter().filter(|(n, _)| *n != account).map(|(_, o)| o.sync_dir.clone()).collect();
-            (a.dir.clone(), a.sync_dir.clone(), others, a.status == "signingin")
+            let others: Vec<String> = s
+                .accounts
+                .iter()
+                .filter(|(n, _)| *n != account)
+                .map(|(_, o)| o.sync_dir.clone())
+                .collect();
+            (
+                a.dir.clone(),
+                a.sync_dir.clone(),
+                others,
+                a.status == "signingin",
+            )
         };
         if busy {
             return Err(fdo::Error::Failed("Finish signing in first".into()));
@@ -770,7 +909,9 @@ impl Daemon {
             check_new_sync_dir(d, &others).map_err(fdo::Error::InvalidArgs)?;
         }
         if let Some(bad) = excluded.iter().find(|e| !valid_folder_name(e)) {
-            return Err(fdo::Error::InvalidArgs(format!("Folder name can't be excluded: {bad}")));
+            return Err(fdo::Error::InvalidArgs(format!(
+                "Folder name can't be excluded: {bad}"
+            )));
         }
         let config_path = confdir.join("config");
         let old = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -799,29 +940,49 @@ impl Daemon {
             a.resync_next |= result.is_ok();
         });
         self.resume_account(account);
-        result.map_err(|e| fdo::Error::Failed(format!("Cannot write {}: {e}", config_path.display())))
+        result
+            .map_err(|e| fdo::Error::Failed(format!("Cannot write {}: {e}", config_path.display())))
     }
 
     /// Create a new account in ~/.config/onedrive/accounts/<name> syncing to `sync_dir`; then SignIn.
     fn add_account(&self, name: &str, sync_dir: &str) -> fdo::Result<()> {
         if !valid_account_name(name) {
-            return Err(fdo::Error::InvalidArgs("Use the account's email address as its name".into()));
+            return Err(fdo::Error::InvalidArgs(
+                "Use the account's email address as its name".into(),
+            ));
         }
-        let others: Vec<String> = self.state.lock().unwrap().accounts.values().map(|a| a.sync_dir.clone()).collect();
+        let others: Vec<String> = self
+            .state
+            .lock()
+            .unwrap()
+            .accounts
+            .values()
+            .map(|a| a.sync_dir.clone())
+            .collect();
         check_new_sync_dir(sync_dir, &others).map_err(fdo::Error::InvalidArgs)?;
         let dir = config_base().join("accounts").join(name);
         if dir.exists() || self.state.lock().unwrap().accounts.contains_key(name) {
-            return Err(fdo::Error::InvalidArgs(format!("An account named {name} already exists")));
+            return Err(fdo::Error::InvalidArgs(format!(
+                "An account named {name} already exists"
+            )));
         }
         // the account folder will hold its sign-in token: private to this user
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&dir)
-            .and_then(|_| std::fs::write(dir.join("config"), format!("sync_dir = \"{sync_dir}\"\n")))
+            .and_then(|_| {
+                std::fs::write(dir.join("config"), format!("sync_dir = \"{sync_dir}\"\n"))
+            })
             .map_err(|e| fdo::Error::Failed(format!("Cannot create {}: {e}", dir.display())))?;
         self.update(|s| {
-            let a = Account { sync_dir: sync_dir.to_string(), dir, status: "signedout", needs_auth: true, ..Default::default() };
+            let a = Account {
+                sync_dir: sync_dir.to_string(),
+                dir,
+                status: "signedout",
+                needs_auth: true,
+                ..Default::default()
+            };
             s.accounts.insert(name.to_string(), a);
         });
         Ok(())
@@ -837,7 +998,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let accounts = discover();
 
     let conn = zbus::Connection::session().await?;
-    let daemon = Daemon { state: Arc::default(), conn: conn.clone() };
+    let daemon = Daemon {
+        state: Arc::default(),
+        conn: conn.clone(),
+    };
     for (name, dir) in &accounts {
         let needs_auth = !signed_in(dir);
         let a = Account {
@@ -848,7 +1012,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             needs_auth,
             ..Default::default()
         };
-        daemon.state.lock().unwrap().accounts.insert(name.clone(), a);
+        daemon
+            .state
+            .lock()
+            .unwrap()
+            .accounts
+            .insert(name.clone(), a);
     }
     conn.object_server().at(PATH, daemon.clone()).await?;
     conn.request_name(NAME).await?;
@@ -873,7 +1042,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    while daemon.state.lock().unwrap().accounts.values().any(|a| a.running) {
+    while daemon
+        .state
+        .lock()
+        .unwrap()
+        .accounts
+        .values()
+        .any(|a| a.running)
+    {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok(())
@@ -884,45 +1060,97 @@ mod tests {
     use super::*;
 
     fn transfer(action: &'static str, path: &str, ok: bool) -> Option<Event> {
-        Some(Event::Transfer { action, path: path.into(), ok })
+        Some(Event::Transfer {
+            action,
+            path: path.into(),
+            ok,
+        })
     }
 
     #[test]
     fn parses_onedrive_lines() {
-        assert_eq!(parse("Uploading new file: ./Docs/a b.txt ... done"), transfer("upload", "./Docs/a b.txt", true));
-        assert_eq!(parse("Uploading modified file: x.md ... failed!"), transfer("upload", "x.md", false));
-        assert_eq!(parse("...Downloading file: Photos/p.jpg ... done\n"), transfer("download", "Photos/p.jpg", true));
-        assert_eq!(parse("Deleting local file: old.txt"), transfer("delete-local", "old.txt", true));
-        assert_eq!(parse("Deleting item from Microsoft OneDrive: ./gone"), transfer("delete-remote", "./gone", true));
+        assert_eq!(
+            parse("Uploading new file: ./Docs/a b.txt ... done"),
+            transfer("upload", "./Docs/a b.txt", true)
+        );
+        assert_eq!(
+            parse("Uploading modified file: x.md ... failed!"),
+            transfer("upload", "x.md", false)
+        );
+        assert_eq!(
+            parse("...Downloading file: Photos/p.jpg ... done\n"),
+            transfer("download", "Photos/p.jpg", true)
+        );
+        assert_eq!(
+            parse("Deleting local file: old.txt"),
+            transfer("delete-local", "old.txt", true)
+        );
+        assert_eq!(
+            parse("Deleting item from Microsoft OneDrive: ./gone"),
+            transfer("delete-remote", "./gone", true)
+        );
         assert_eq!(
             parse("Uploading new file: ./db-pc-safeBackup-0003.kdbx ... done"),
             transfer("conflict", "./db-pc-safeBackup-0003.kdbx", true)
         );
-        assert_eq!(parse("Starting a sync with Microsoft OneDrive"), Some(Event::Syncing));
-        assert_eq!(parse("Sync with Microsoft OneDrive is complete"), Some(Event::Synced));
         assert_eq!(
-            parse("Sync with Microsoft OneDrive has completed, however there are items that failed to sync."),
+            parse("Starting a sync with Microsoft OneDrive"),
+            Some(Event::Syncing)
+        );
+        assert_eq!(
+            parse("Sync with Microsoft OneDrive is complete"),
+            Some(Event::Synced)
+        );
+        assert_eq!(
+            parse(
+                "Sync with Microsoft OneDrive has completed, however there are items that failed to sync."
+            ),
             Some(Event::SyncedWithFailures)
         );
-        assert_eq!(parse("ERROR: Unable to reach the Microsoft OneDrive API"), Some(Event::Error("Unable to reach the Microsoft OneDrive API".into())));
+        assert_eq!(
+            parse("ERROR: Unable to reach the Microsoft OneDrive API"),
+            Some(Event::Error(
+                "Unable to reach the Microsoft OneDrive API".into()
+            ))
+        );
         let reauth = "You will need to issue a --reauth and re-authorise this client to obtain a fresh auth token.";
         assert_eq!(parse(reauth), Some(Event::SignedOut(reauth.into())));
         assert_eq!(
-            parse("Client requires authentication before proceeding. Waiting for --auth-files elements to be available."),
+            parse(
+                "Client requires authentication before proceeding. Waiting for --auth-files elements to be available."
+            ),
             Some(Event::AuthWaiting)
         );
         assert_eq!(
             parse("Downloading: Videos/big.mp4 ... 45%  |  ETA    00:00:12"),
-            Some(Event::Progress { path: "Videos/big.mp4".into(), percent: 45 })
+            Some(Event::Progress {
+                path: "Videos/big.mp4".into(),
+                percent: 45
+            })
         );
         assert_eq!(
             parse("Uploading: ./a ... b.iso ... 100% | DONE in 00:01:02"),
-            Some(Event::Progress { path: "./a ... b.iso".into(), percent: 100 })
+            Some(Event::Progress {
+                path: "./a ... b.iso".into(),
+                percent: 100
+            })
         );
-        assert_eq!(parse("Number of items to download from Microsoft OneDrive: 12"), Some(Event::Planned(12)));
-        assert_eq!(parse("New items to upload to Microsoft OneDrive: 3"), Some(Event::Planned(3)));
-        assert_eq!(parse_quota("Used:      0.15 GB (161061273 bytes)"), Some(("Used", 161061273)));
-        assert_eq!(parse_quota("Total:     5 GB (5368709120 bytes)"), Some(("Total", 5368709120)));
+        assert_eq!(
+            parse("Number of items to download from Microsoft OneDrive: 12"),
+            Some(Event::Planned(12))
+        );
+        assert_eq!(
+            parse("New items to upload to Microsoft OneDrive: 3"),
+            Some(Event::Planned(3))
+        );
+        assert_eq!(
+            parse_quota("Used:      0.15 GB (161061273 bytes)"),
+            Some(("Used", 161061273))
+        );
+        assert_eq!(
+            parse_quota("Total:     5 GB (5368709120 bytes)"),
+            Some(("Total", 5368709120))
+        );
         assert_eq!(parse_quota("Deleted:   0 GB (0 bytes)"), None);
         // in-progress transfer without result, and noise
         assert_eq!(parse("Downloading file: big.iso ... "), None);
@@ -934,21 +1162,51 @@ mod tests {
         let mut s = State::default();
         s.accounts.insert("a".into(), Account::default());
         s.apply("a", Event::Planned(2));
-        s.apply("a", Event::Progress { path: "big".into(), percent: 40 });
-        assert_eq!((s.accounts["a"].current.as_str(), s.accounts["a"].percent), ("big", 40));
-        s.apply("a", Event::Transfer { action: "download", path: "big".into(), ok: true });
-        s.apply("a", Event::Transfer { action: "delete-local", path: "x".into(), ok: true });
+        s.apply(
+            "a",
+            Event::Progress {
+                path: "big".into(),
+                percent: 40,
+            },
+        );
+        assert_eq!(
+            (s.accounts["a"].current.as_str(), s.accounts["a"].percent),
+            ("big", 40)
+        );
+        s.apply(
+            "a",
+            Event::Transfer {
+                action: "download",
+                path: "big".into(),
+                ok: true,
+            },
+        );
+        s.apply(
+            "a",
+            Event::Transfer {
+                action: "delete-local",
+                path: "x".into(),
+                ok: true,
+            },
+        );
         let a = &s.accounts["a"];
         assert_eq!((a.planned, a.transferred, a.current.as_str()), (2, 1, ""));
         s.apply("a", Event::Synced);
-        assert_eq!((s.accounts["a"].planned, s.accounts["a"].transferred), (0, 0));
+        assert_eq!(
+            (s.accounts["a"].planned, s.accounts["a"].transferred),
+            (0, 0)
+        );
     }
 
     #[test]
     fn reads_sync_dir() {
         let dir = std::env::temp_dir().join(format!("odg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config"), "# sync_dir = \"/nope\"\nsync_dir_permissions = \"700\"\nsync_dir = \"/data/od\"\n").unwrap();
+        std::fs::write(
+            dir.join("config"),
+            "# sync_dir = \"/nope\"\nsync_dir_permissions = \"700\"\nsync_dir = \"/data/od\"\n",
+        )
+        .unwrap();
         assert_eq!(sync_dir(&dir), "/data/od");
         std::fs::write(dir.join("config"), "sync_dir = \"~/OneDrive_x\"\n").unwrap();
         assert_eq!(sync_dir(&dir), home().join("OneDrive_x").to_string_lossy());
@@ -972,8 +1230,14 @@ mod tests {
         assert_eq!(managed_exclude("skip_dir = \"/Docs\""), Some("Docs".into()));
         assert_eq!(managed_exclude("skip_dir = \"/Docs/Sub\""), None);
         assert_eq!(managed_exclude("skip_dir = \"Docs\""), None);
-        assert!(!valid_folder_name("a|b") && !valid_folder_name("x*") && valid_folder_name("My Files"));
-        assert!(valid_account_name("me@outlook.com") && !valid_account_name("../x") && !valid_account_name(".hidden"));
+        assert!(
+            !valid_folder_name("a|b") && !valid_folder_name("x*") && valid_folder_name("My Files")
+        );
+        assert!(
+            valid_account_name("me@outlook.com")
+                && !valid_account_name("../x")
+                && !valid_account_name(".hidden")
+        );
         assert!(!valid_account_name("a b") && !valid_account_name(""));
     }
 

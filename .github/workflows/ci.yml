@@ -1,0 +1,45 @@
+name: CI
+
+# One gate for pull requests and pushes to main. Runs on Arch (the target distro) so the Qt6,
+# KDE and D-Bus versions are the ones the package is built against.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt, clippy, tests, package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Dependencies
+        run: |
+          pacman -Syu --noconfirm --needed git rust cmake ninja shellcheck dbus glib2 \
+            qt6-base qt6-declarative layer-shell-qt kio extra-cmake-modules
+          # makepkg refuses to run as root
+          useradd -m builder
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: daemon
+      - name: Format
+        run: cargo fmt --manifest-path daemon/Cargo.toml -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path daemon/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Shellcheck
+        run: shellcheck install.sh tests/run.sh daemon/tests/*.sh dolphin/tests/*.sh
+      - name: Tests
+        run: tests/run.sh
+      - name: Package
+        run: |
+          chown -R builder .
+          su builder -c 'cd packaging/arch && makepkg -f --nodeps'
