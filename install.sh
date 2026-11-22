@@ -91,7 +91,7 @@ start_daemon() {
     [ "$START" = 1 ] || return 0
     systemctl --user daemon-reload
     systemctl --user enable --now "$UNIT"
-    systemctl --user is-active --quiet "$UNIT" && say "Daemon running" || warn "Daemon failed: journalctl --user -u $UNIT"
+    if systemctl --user is-active --quiet "$UNIT"; then say "Daemon running"; else warn "Daemon failed: journalctl --user -u $UNIT"; fi
     if [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && ! pgrep -x onedrive-gui >/dev/null; then
         (setsid onedrive-gui >/dev/null 2>&1 &) || true
     fi
