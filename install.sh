@@ -57,6 +57,7 @@ check_onedrive() {
     have onedrive && return 0
     warn "'onedrive' (abraunegg/onedrive) is not installed; the GUI needs it to sync."
     if is_arch && have yay && [ -t 0 ] && ask "Install onedrive-abraunegg from the AUR with yay?"; then
+        # No --noconfirm on purpose: yay's prompts are where you review the AUR build.
         yay -S --needed onedrive-abraunegg
     else
         warn "Install it later (Arch AUR: onedrive-abraunegg) before adding an account."
@@ -67,6 +68,7 @@ install_arch() {
     say "Building and installing the pacman package"
     # Never leave a half-removed old ~/.local install shadowing the package.
     stop_daemon; remove_local
+    # Runs as you: makepkg refuses root and calls sudo pacman itself for -s (build deps) and -i (install).
     local opts=(-fsci); [ "$YES" = 1 ] && opts+=(--noconfirm)
     (cd "$SRC/packaging/arch" && makepkg "${opts[@]}")
 }
