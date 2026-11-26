@@ -22,19 +22,22 @@ jobs:
     steps:
       - name: Dependencies
         run: |
-          pacman -Syu --noconfirm --needed git rust cmake ninja shellcheck dbus glib2 \
+          pacman -Syu --noconfirm --needed git rust cmake ninja shellcheck python dbus glib2 \
             qt6-base qt6-declarative layer-shell-qt kio extra-cmake-modules
           # makepkg refuses to run as root
           useradd -m builder
           git config --global --add safe.directory '*'
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: daemon
       - name: Format
         run: cargo fmt --manifest-path daemon/Cargo.toml -- --check
       - name: Clippy
         run: cargo clippy --manifest-path daemon/Cargo.toml --all-targets --locked -- -D warnings
+      - name: File size limit
+        run: python3 scripts/check-file-size.py
+
       - name: Shellcheck
         run: shellcheck install.sh tests/run.sh daemon/tests/*.sh dolphin/tests/*.sh
       - name: Tests

@@ -1,0 +1,23 @@
+name: Bug report
+description: Something does not work or does the wrong thing.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got. Paste commands and output.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release or commit you ran.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS and how you installed it
+      placeholder: Arch Linux, built from source
