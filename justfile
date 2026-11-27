@@ -12,6 +12,13 @@ lint:
     cargo clippy --manifest-path daemon/Cargo.toml --all-targets -- -D warnings
     shellcheck install.sh tests/run.sh daemon/tests/*.sh dolphin/tests/*.sh
 
+# production files stay at or below 800 lines (the baseline can only shrink)
+file-size:
+    python3 scripts/check-file-size.py
+
+# the full local gate; CI runs the same checks
+check: lint file-size test
+
 # unit tests + end-to-end on a private D-Bus
 test:
     tests/run.sh
