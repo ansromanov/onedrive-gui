@@ -1,3 +1,0 @@
-# Production files that were over the limit when the gate was added.
-# Sizes can only go down: split the module, then lower or remove the entry.
-daemon/src/main.rs 1257
